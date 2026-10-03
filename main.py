@@ -29,16 +29,21 @@ POST /check/batch  (JSON body)
     }
     Check multiple cards in one request. Returns a list of CheckResponse.
 
-Response (both endpoints)
+Response (all endpoints)
 --------------------------
 {
-    "status":      "CHARGED | APPROVED | DECLINED | ERROR",
+    "Response":    "CHARGED | APPROVED | DECLINED | ERROR",
+    "CC":          "4111...|12|2026|123",
+    "Price":       "9.99",
+    "Gate":        "Shopify",
+    "Site":        "https://...",
+    "Charged":     "True | False",
     "status_code": "ORDER_PLACED | INSUFFICIENT_FUNDS | CARD_DECLINED | ...",
-    "amount":      "9.99",
     "error":       "human-readable error message or empty string",
     "retryable":   true | false,
     "receipt_url": "https://... or empty string",
-    "Gateway":     "Shopify"          (added for bot compatibility)
+    "status":      "CHARGED | APPROVED | DECLINED | ERROR",
+    "Gateway":     "Shopify"
 }
 
 Environment variables
@@ -62,6 +67,7 @@ import concurrent.futures
 import functools
 import logging
 import time
+import threading
 from typing import Optional, Tuple, List
 
 from fastapi import FastAPI, Query
@@ -84,9 +90,7 @@ logger = logging.getLogger("cardcheckout.api")
 
 # ── Configuration ──────────────────────────────────────────────────────
 THREAD_WORKERS = int(os.environ.get("CHECKER_THREADS", "200"))
-MAX_RETRIES    = int(os.environ.get("CHECKER_RETRIES", "1"))   # retry once by default
-
-import threading as _threading
+MAX_RETRIES    = int(os.environ.get("CHECKER_RETRIES", "1"))
 
 # Thread pool — runs blocking checkout in parallel without blocking the event loop
 _pool = concurrent.futures.ThreadPoolExecutor(
@@ -96,12 +100,14 @@ _pool = concurrent.futures.ThreadPoolExecutor(
 
 # Active-checks counter (thread-safe)
 _active_checks      = 0
-_active_checks_lock = _threading.Lock()
+_active_checks_lock = threading.Lock()
+
 
 def _inc_active():
     global _active_checks
     with _active_checks_lock:
         _active_checks += 1
+
 
 def _dec_active():
     global _active_checks
@@ -112,7 +118,7 @@ def _dec_active():
 # ── FastAPI app ────────────────────────────────────────────────────────
 app = FastAPI(
     title="CardCheckout API",
-    version="2.0.0",
+    version="2.1.0",
     description=(
         "Shopify card-check API. "
         "Provide a shop URL, proxy, and card — the engine finds the cheapest "
@@ -290,7 +296,7 @@ input::placeholder{color:var(--text3)}
   <a class="logo" href="#">
     <div class="logo-icon"><i class="ph-bold ph-lightning" style="color:#fff;font-size:19px"></i></div>
     <span class="logo-name">Card<em>Checkout</em></span>
-    <span class="logo-ver">v2.0</span>
+    <span class="logo-ver">v2.1</span>
   </a>
   <div class="nav-r">
     <div class="live-pill"><div class="live-dot"></div>Live</div>
@@ -319,7 +325,6 @@ input::placeholder{color:var(--text3)}
   <span class="sh-title">Endpoints</span><div class="sh-line"></div>
 </div>
 
-<!-- GET /health -->
 <div class="ep" id="e-health">
 <div class="ep-h" onclick="tog('e-health')">
   <span class="mtag GET">GET</span><span class="ep-path">/health</span>
@@ -333,12 +338,11 @@ input::placeholder{color:var(--text3)}
     <div class="rbox" id="rb-health"><div class="rhead"><div class="rstat">Response<span class="rbadge" id="bd-health"></span></div><span class="rtime" id="rt-health"></span></div><div class="rbody" id="by-health"></div></div>
   </div>
   <div id="ht-res" class="panel">
-    <div class="cb2"><button class="cpbtn" onclick="cp(this)"><i class="ph-bold ph-copy"></i>Copy</button>{"ok": true, "threads": 200, "retries": 1}</div>
+    <div class="cb2"><button class="cpbtn" onclick="cp(this)"><i class="ph-bold ph-copy"></i>Copy</button>{"ok": true, "threads": 200, "retries": 1, "active_checks": 0}</div>
   </div>
 </div>
 </div>
 
-<!-- GET /check -->
 <div class="ep" id="e-get">
 <div class="ep-h" onclick="tog('e-get')">
   <span class="mtag GET">GET</span><span class="ep-path">/check</span>
@@ -377,7 +381,6 @@ input::placeholder{color:var(--text3)}
 </div>
 </div>
 
-<!-- POST /check -->
 <div class="ep" id="e-post">
 <div class="ep-h" onclick="tog('e-post')">
   <span class="mtag POST">POST</span><span class="ep-path">/check</span>
@@ -411,9 +414,42 @@ Content-Type: application/json
   </div>
 </div>
 </div>
+
+<div class="ep" id="e-batch">
+<div class="ep-h" onclick="tog('e-batch')">
+  <span class="mtag POST">POST</span><span class="ep-path">/check/batch</span>
+  <span class="ep-desc">Check multiple cards</span><i class="ph-bold ph-caret-down chev"></i>
+</div>
+<div class="ep-b">
+  <div class="tabs">
+    <div class="t on" onclick="swt(this,'bt-try')"><i class="ph-bold ph-terminal-window"></i>Try It</div>
+    <div class="t" onclick="swt(this,'bt-ex')"><i class="ph-bold ph-code"></i>JSON Body</div>
+  </div>
+  <div id="bt-try" class="panel on">
+    <div class="form">
+      <div><div class="fl"><i class="ph-bold ph-credit-card" style="color:var(--p2)"></i>Cards (one per line) <span class="rs">*</span></div><textarea id="bc" rows="4" style="width:100%;background:rgba(0,0,0,.35);border:1px solid var(--border2);border-radius:var(--r2);padding:10px 14px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;resize:vertical" placeholder="4111111111111111|12|2026|123&#10;4242424242424242|06|2027|456"></textarea></div>
+      <div><div class="fl"><i class="ph-bold ph-storefront" style="color:var(--p2)"></i>Shop URL <span class="rs">*</span></div><input type="text" id="bu" placeholder="https://store.myshopify.com"/></div>
+      <div><div class="fl"><i class="ph-bold ph-shield-check" style="color:var(--p2)"></i>Proxy <span class="rs">*</span></div><input type="text" id="bp" placeholder="http://user:pass@host:port"/></div>
+      <label class="cb"><input type="checkbox" id="bl" checked/> Low mode — prefer products under $5</label>
+      <button class="sbtn" onclick="req('batch',event)"><i class="ph-bold ph-paper-plane-tilt"></i>Send Request</button>
+    </div>
+    <div class="rbox" id="rb-batch"><div class="rhead"><div class="rstat">Response<span class="rbadge" id="bd-batch"></span></div><span class="rtime" id="rt-batch"></span></div><div class="rbody" id="by-batch"></div></div>
+  </div>
+  <div id="bt-ex" class="panel">
+    <div class="cb2"><button class="cpbtn" onclick="cp(this)"><i class="ph-bold ph-copy"></i>Copy</button>POST /check/batch
+Content-Type: application/json
+
+{
+  "cards":    ["4111...|12|2026|123", "4242...|12|2026|456"],
+  "shop_url": "https://store.myshopify.com",
+  "proxy":    "http://user:pass@1.2.3.4:8080",
+  "low":      true
+}</div>
+  </div>
+</div>
+</div>
 </div>
 
-<!-- RESPONSE STATUSES -->
 <div id="responses">
 <div class="sh">
   <div class="sh-icon" style="background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.18)"><i class="ph-bold ph-chart-bar" style="color:var(--p2);font-size:14px"></i></div>
@@ -427,7 +463,6 @@ Content-Type: application/json
 </div>
 </div>
 
-<!-- PROXY FORMATS -->
 <div class="sh" style="margin-top:40px">
   <div class="sh-icon" style="background:rgba(6,182,212,.08);border:1px solid rgba(6,182,212,.18)"><i class="ph-bold ph-shield-check" style="color:var(--cyan);font-size:14px"></i></div>
   <span class="sh-title">Proxy Formats</span><div class="sh-line"></div>
@@ -461,16 +496,25 @@ function hl(j){
 }
 async function req(t,ev){
   const btn=ev.target.closest('button');
-  btn.disabled=true;btn.innerHTML='<i class="ph-bold ph-circle-notch" style="animation:spin 1s linear infinite"></i>Sending…';
+  btn.disabled=true;btn.innerHTML='<i class="ph-bold ph-circle-notch" style="animation:spin 1s linear infinite"></i>Sending&hellip;';
   const rb=document.getElementById('rb-'+t),bd=document.getElementById('bd-'+t),rt=document.getElementById('rt-'+t),by=document.getElementById('by-'+t);
   const t0=Date.now();
   try{
     let r;
     if(t==='health'){r=await fetch('/health');}
     else if(t==='get'){const p=new URLSearchParams({card:gc.value,url:gu.value,proxy:gp.value,low:gl.checked?'true':'false'});r=await fetch('/check?'+p);}
-    else{r=await fetch('/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({card:pc.value,shop_url:pu.value,proxy:pp.value,low:pl.checked})});}
+    else if(t==='post'){r=await fetch('/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({card:pc.value,shop_url:pu.value,proxy:pp.value,low:pl.checked})});}
+    else if(t==='batch'){
+      const cards=bc.value.split('\\n').map(s=>s.trim()).filter(Boolean);
+      r=await fetch('/check/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cards:cards,shop_url:bu.value,proxy:bp.value,low:bl.checked})});
+    }
     const d=await r.json();const el=((Date.now()-t0)/1000).toFixed(2);
-    const s=d.Response||d.status||'ERROR';bd.textContent=s;bd.className='rbadge S-'+s;
+    if(t==='batch'&&Array.isArray(d)){
+      const s=d.some(x=>x.Response==='CHARGED')?'CHARGED':d.some(x=>x.Response==='APPROVED')?'APPROVED':d.every(x=>x.Response==='DECLINED')?'DECLINED':'ERROR';
+      bd.textContent=d.length+' cards';bd.className='rbadge S-'+s;
+    }else{
+      const s=d.Response||d.status||'ERROR';bd.textContent=s;bd.className='rbadge S-'+s;
+    }
     rt.textContent=el+'s';by.innerHTML=hl(d);rb.classList.add('show');
   }catch(e){bd.textContent='ERROR';bd.className='rbadge S-ERROR';rt.textContent='';by.textContent='Request failed: '+e.message;rb.classList.add('show');}
   btn.disabled=false;btn.innerHTML='<i class="ph-bold ph-paper-plane-tilt"></i>Send Request';
@@ -481,8 +525,7 @@ function cp(btn){
 }
 const s=document.createElement('style');s.textContent='@keyframes spin{to{transform:rotate(360deg)}}';document.head.appendChild(s);
 window.addEventListener('scroll',()=>document.getElementById('stb').classList.toggle('vis',scrollY>300));
-const [gc,gu,gp,gl,pc,pu,pp,pl]=['gc','gu','gp','gl','pc','pu','pp','pl'].map(id=>document.getElementById(id));
-if(sessionStorage.getItem('ccv')!=='76e00d0'){sessionStorage.setItem('ccv','76e00d0');location.reload(true);}
+const [gc,gu,gp,gl,pc,pu,pp,pl,bc,bu,bp,bl]=['gc','gu','gp','gl','pc','pu','pp','pl','bc','bu','bp','bl'].map(id=>document.getElementById(id));
 </script>
 </body>
 </html>
@@ -493,10 +536,10 @@ if(sessionStorage.getItem('ccv')!=='76e00d0'){sessionStorage.setItem('ccv','76e0
 
 class CheckRequest(BaseModel):
     """POST /check request body."""
-    card:     Optional[str]  = None   # format: number|mm|yyyy|cvv
-    shop_url: Optional[str]  = None   # e.g. https://store.myshopify.com
-    proxy:    Optional[str]  = None   # e.g. http://user:pass@1.2.3.4:8080
-    low:      bool           = True   # True = prefer products under $5 (safer)
+    card:     Optional[str] = None
+    shop_url: Optional[str] = None
+    proxy:    Optional[str] = None
+    low:      bool          = True
 
     model_config = {
         "json_schema_extra": {
@@ -510,13 +553,12 @@ class CheckRequest(BaseModel):
     }
 
 
-# ── NEW: Batch request model ──────────────────────────────────────────
 class BatchCheckRequest(BaseModel):
     """POST /check/batch request body."""
-    cards:    List[str]      # list of card strings
-    shop_url: str            # e.g. https://store.myshopify.com
-    proxy:    str            # e.g. http://user:pass@1.2.3.4:8080
-    low:      bool = True    # True = prefer products under $5
+    cards:    List[str]
+    shop_url: str
+    proxy:    str
+    low:      bool = True
 
 
 class CheckResponse(BaseModel):
@@ -531,18 +573,13 @@ class CheckResponse(BaseModel):
     error:       str  = ""
     retryable:   bool = False
     receipt_url: str  = ""
-    # Added for bot compatibility:
-    status:      str  = "ERROR"      # same as Response
-    Gateway:     str  = "Shopify"    # same as Gate
+    status:      str  = "ERROR"
+    Gateway:     str  = "Shopify"
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
 def _validate_proxy(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
-    """
-    Normalize and validate proxy string.
-    Returns (proxy_url, None) on success or (None, error_response) on failure.
-    """
     if not raw or not raw.strip():
         return None, CheckResponse(
             Response="ERROR",
@@ -562,11 +599,6 @@ def _validate_proxy(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
 
 
 def _validate_card(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
-    """
-    Validate card format (number|mm|yyyy|cvv).
-    Also rejects expired cards before any network call.
-    Returns (card_entry, None) on success or (None, error_response) on failure.
-    """
     import datetime as _dt
     if not raw or not raw.strip():
         return None, CheckResponse(
@@ -584,7 +616,6 @@ def _validate_card(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
             error=f"invalid card format: {exc}",
             retryable=False,
         )
-    # Expiry check — card expires at end of the given month
     now = _dt.datetime.utcnow()
     if _year < now.year or (_year == now.year and _month < now.month):
         return None, CheckResponse(
@@ -597,7 +628,6 @@ def _validate_card(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
 
 
 def _validate_url(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
-    """Validate shop URL — must have a real hostname with at least one dot."""
     import urllib.parse as _up
     if not raw or not raw.strip():
         return None, CheckResponse(
@@ -612,7 +642,6 @@ def _validate_url(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
     try:
         parsed = _up.urlparse(url)
         hostname = parsed.hostname or ""
-        # Must have a dot (e.g. "example.com") and no spaces
         if not hostname or "." not in hostname or " " in hostname:
             raise ValueError(hostname)
     except Exception:
@@ -626,7 +655,6 @@ def _validate_url(raw: str) -> Tuple[Optional[str], Optional[CheckResponse]]:
 
 
 def _build_response(res, shop_url: str = "") -> CheckResponse:
-    """Convert internal CheckResult to API CheckResponse."""
     status_name = res.status.name
     return CheckResponse(
         Response    = status_name,
@@ -639,17 +667,13 @@ def _build_response(res, shop_url: str = "") -> CheckResponse:
         error       = str(res.error) if res.error else "",
         retryable   = res.retryable,
         receipt_url = res.receipt_url or "",
-        # Added for bot compatibility:
         status      = status_name,
         Gateway     = "Shopify",
     )
 
 
 async def _run_check(shop_url: str, card: str, proxy_url: str, low: bool) -> CheckResponse:
-    """
-    Execute the checkout in a thread-pool worker.
-    Automatically retries once on retryable errors (configurable via CHECKER_RETRIES).
-    """
+    """Execute the checkout in a thread-pool worker with auto-retry."""
     loop     = asyncio.get_event_loop()
     attempts = 1 + MAX_RETRIES
     last: Optional[CheckResponse] = None
@@ -663,14 +687,16 @@ async def _run_check(shop_url: str, card: str, proxy_url: str, low: bool) -> Che
         except Exception as exc:
             logger.warning("attempt %d/%d — unhandled exception: %s", attempt, attempts, exc)
             last = CheckResponse(Response="ERROR", error=str(exc), retryable=True)
+            _dec_active()
             continue
-        finally:
+        else:
             _dec_active()
 
         resp = _build_response(res, shop_url)
         logger.info(
             "attempt %d/%d | status=%-8s code=%-24s elapsed=%.1fs",
-            attempt, attempts, resp.Response, resp.status_code or "-", time.perf_counter() - t0,
+            attempt, attempts, resp.Response, resp.status_code or "-",
+            time.perf_counter() - t0,
         )
         if resp.Response in ("CHARGED", "APPROVED"):
             logger.info(
@@ -743,6 +769,7 @@ async def check_post(req: CheckRequest):
     """Check a card via POST JSON body."""
     raw_card = req.card or ""
     raw_url  = req.shop_url or ""
+
     card_val, err = _validate_card(raw_card)
     if err:
         err.CC = raw_card
@@ -764,7 +791,6 @@ async def check_post(req: CheckRequest):
     return resp
 
 
-# ── NEW: Batch endpoint ──────────────────────────────────────────────
 @app.post("/check/batch", response_model=List[CheckResponse], tags=["check"])
 async def check_batch(req: BatchCheckRequest):
     """
@@ -774,28 +800,36 @@ async def check_batch(req: BatchCheckRequest):
     # Validate shop URL and proxy once
     url_val, err_url = _validate_url(req.shop_url)
     if err_url:
-        # Return the same error for all cards in the batch
-        return [err_url] * len(req.cards)
+        return [err_url.model_copy(update={"CC": c}) for c in req.cards]
 
     proxy_val, err_proxy = _validate_proxy(req.proxy)
     if err_proxy:
-        return [err_proxy] * len(req.cards)
+        return [err_proxy.model_copy(update={"CC": c, "Site": url_val}) for c in req.cards]
 
-    # Run each card concurrently
-    loop = asyncio.get_event_loop()
+    # Build tasks — invalid cards get an immediate error response,
+    # valid cards run through the full checkout engine concurrently.
     tasks = []
     for card in req.cards:
         card_val, err_card = _validate_card(card)
         if err_card:
-            # Invalid card → store the error response as a dummy task
-            async def _dummy_error(resp=err_card):
-                return resp
-            tasks.append(_dummy_error())
+            err_card.CC = card
+            # FIX: use functools.partial to properly capture the error response
+            # instead of a closure that could have late-binding issues
+            tasks.append(functools.partial(_immediate_response, err_card))
         else:
-            tasks.append(_run_check(url_val, card_val, proxy_val, req.low))
+            tasks.append(functools.partial(
+                _run_check, url_val, card_val, proxy_val, req.low
+            ))
 
-    responses = await asyncio.gather(*tasks)
+    # Run all tasks concurrently — mix of coroutines and partial-wrapped coroutines
+    coroutines = [t() if callable(t) else t for t in tasks]
+    responses = await asyncio.gather(*coroutines)
     return responses
+
+
+async def _immediate_response(resp: CheckResponse) -> CheckResponse:
+    """Return a pre-built response immediately (used for invalid cards in batch)."""
+    return resp
 
 
 # ── Standalone runner ──────────────────────────────────────────────────
@@ -803,5 +837,8 @@ async def check_batch(req: BatchCheckRequest):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
-    logger.info("CardCheckout API — port=%d threads=%d retries=%d", port, THREAD_WORKERS, MAX_RETRIES)
+    logger.info(
+        "CardCheckout API — port=%d threads=%d retries=%d",
+        port, THREAD_WORKERS, MAX_RETRIES,
+    )
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
