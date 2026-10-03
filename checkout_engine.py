@@ -449,11 +449,63 @@ def fetch_private_access_token(client: TLSClient, shop_url: str,
 # ──────────────────────── Step 3: actions JS ─────────────────────────
 
 def extract_actions_js_url(checkout_html: str, shop_url: str) -> str:
-    match = re.search(
-        r'(/cdn/shopifycloud/checkout-web/assets/c1/actions[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.js)',
-        checkout_html,
+    """
+    Extract actions JS URL from checkout HTML.
+    Shopify changes URL patterns frequently — try multiple strategies.
+    FIX: expanded from single narrow regex to 5 fallback strategies.
+    """
+    decoded = html.unescape(checkout_html)
+
+    # Strategy 1: absolute URL (https://...checkout-web/...actions....js)
+    m = re.search(
+        r'(https?://[^"\'<>\s]+/checkout-web/[^"\'<>\s]*actions[^"\'<>\s]*\.js)',
+        decoded,
     )
-    return shop_url + match.group(1) if match else ""
+    if m:
+        return m.group(1)
+
+    # Strategy 2: /cdn/shopifycloud/checkout-web/assets/{version}/actions....js
+    m = re.search(
+        r'(/cdn/shopifycloud/checkout-web/assets/[^"\'<>\s]*actions[^"\'<>\s]*\.js)',
+        decoded,
+    )
+    if m:
+        path = m.group(1)
+        return path if path.startswith("http") else shop_url + path
+
+    # Strategy 3: any relative path containing checkout-web + actions + .js
+    m = re.search(
+        r'(/[^"\'<>\s]*checkout-web[^"\'<>\s]*actions[^"\'<>\s]*\.js)',
+        decoded,
+    )
+    if m:
+        path = m.group(1)
+        return path if path.startswith("http") else shop_url + path
+
+    # Strategy 4: script tag with actions in src
+    m = re.search(
+        r'<script[^>]+src=["\']([^"\']*actions[^"\']*\.js)["\']',
+        decoded,
+        re.IGNORECASE,
+    )
+    if m:
+        src = m.group(1)
+        if src.startswith("http"):
+            return src
+        if src.startswith("/"):
+            return shop_url + src
+        return src
+
+    # Strategy 5: last resort — any .js with "actions" in it
+    m = re.search(r'"([^"]*actions[^"]*\.js)"', decoded)
+    if m:
+        src = m.group(1)
+        if src.startswith("http"):
+            return src
+        if src.startswith("/"):
+            return shop_url + src
+
+    return ""
 
 
 def fetch_actions_js(client: TLSClient, actions_url: str, shop_url: str) -> str:
@@ -1742,7 +1794,11 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "",
         try:
             actions_url = extract_actions_js_url(checkout_html, shop_url)
             if not actions_url:
+                # Log a snippet of the HTML so we can see what pattern Shopify is using
+                _snippet = checkout_html[:2000]
+                logger.error("Step 3: no actions JS URL found. HTML snippet: %s", _snippet)
                 raise Exception("could not find actions JS URL")
+            logger.info(_redact(f"Step 3: actions_url={actions_url}"))
             js_body = fetch_actions_js(client, actions_url, shop_url)
             proposal_id = extract_proposal_id(js_body)
             submit_id = extract_submit_for_completion_id(js_body)
@@ -1810,7 +1866,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "",
             return result
 
         # ── Step 6: Proposal 3 (address + shipping country fallback) ─
-        # FIX: initialize step6_is_digital BEFORE the loop to prevent NameError
         step6_is_digital = False
         try:
             addr = address_for_country(country)
@@ -1826,7 +1881,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "",
                     stable_id, variant_id, price, proposal_id, build_id, source_token,
                     qt2, email, addr, currency, country,
                 )
-                # FIX: check proposal errors for step 6
                 check_proposal_errors("step6", _p6_status, proposal3_body)
 
                 _qt3 = extract_queue_token(proposal3_body)
@@ -1864,7 +1918,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "",
                 stable_id, variant_id, price, proposal_id, build_id, source_token,
                 queue_token3, email, addr, currency, country,
             )
-            # FIX: check proposal errors for step 7
             check_proposal_errors("step7", _p7_status, proposal4_body)
             queue_token4 = extract_queue_token(proposal4_body)
             if not queue_token4:
@@ -1965,7 +2018,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "",
             if not queue_token5:
                 raise Exception("could not extract queueToken")
 
-            # Use the digital flag locked in during Step 6
             is_digital = step6_is_digital
 
             delivery_handle = extract_delivery_handle(proposal5_body)
@@ -2175,7 +2227,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "",
         return result
 
     except HardCardError as e:
-        # Card-level hard failure — non-retryable
         result.status = CheckStatus.DECLINED
         result.status_code = str(e).replace("proposal hard error: ", "")
         result.error = e
